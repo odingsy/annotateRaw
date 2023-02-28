@@ -310,3 +310,69 @@ peakPlot <- function (oriSeq, spec, peptideSequence = modoutput(oriSeq), fi = fr
   # return(m)
 }
 
+# zoomed-in the chromatogram bound by rtmin-offset and rtmin+offset. exclude zero intensities -----
+# (when plot using `elimiate0 = TRUE` for aesthetic purpose; when calculating auc, using FALSE. TODO check with xcalibur integration)
+chromatoZoomed <- function(x, rtmin, offset = 10, eliminate0 = TRUE){
+  for (i in seq_len(length(x))){
+    if(eliminate0){
+      idx <- which(x[[i]]$times > rtmin - offset & x[[i]]$times < rtmin + offset & x[[i]]$intensities > 0)
+    } else {
+      idx <- which(x[[i]]$times > rtmin - offset & x[[i]]$times < rtmin + offset)
+    }
+    x[[i]]$times <- x[[i]]$times[idx]
+    x[[i]]$intensities <- x[[i]]$intensities[idx]
+  }
+  return(x)
+}
+
+# integrate AUC using trapezoid method between a manually chosen "integalab" -----
+auc <- function(x, integalab){
+  AUC <- vector(mode = 'double', length = length(x))
+  for (i in seq_len(length(x))){
+    inten_InArea <- x[[i]]$intensities[x[[i]]$times >= integalab[1] & x[[i]]$times <= integalab[2]]
+    time_InArea <- x[[i]]$times[x[[i]]$times >= integalab[1] & x[[i]]$times <= integalab[2]]
+    AUC[i] <- lapply(seq_len(length(inten_InArea) - 1), function(n){
+      (inten_InArea[n] + inten_InArea[n+1]) * (time_InArea[n+1] - time_InArea[n]) / 2 
+    })|> unlist() |> sum()
+  }
+  return(AUC)
+}
+
+# replace rawrr:::plot.rawrrChromatogram  -----
+plot.rawrrChromatogramSet <- function (x_ori, rtmin, offset = 10, integalab, wAUC = FALSE, diagnostic = FALSE, ...){
+  if(!is.null(rtmin)){
+    x <- chromatoZoomed(x = x_ori, rtmin = rtmin, offset = offset, eliminate0 = TRUE)
+  }
+  stopifnot(attr(x, "class") == "rawrrChromatogramSet")
+  if (attr(x, "type") == "xic") {
+    plot(0, 0, type = "n", 
+         xlim = range(unlist(lapply(x, function(o) {o$times}))), 
+         ylim = range(unlist(lapply(x, function(o) {o$intensities}))), 
+         frame.plot = FALSE, xlab = "Retention Time [min]",
+         ylab = "Intensities", ...)
+    cm <- hcl.colors(length(x), "Set 2")
+    mapply(function(o, co) {
+      lines(o$times, o$intensities, col = co)
+    }, x, cm)
+    if (wAUC){
+      monoisotopicMass <- lapply(x, function(o) {o$mass}) |> unlist()
+      AUC <- chromatoZoomed(x = x_ori, rtmin = rtmin, offset = offset, eliminate0 = FALSE) |> auc(integalab = integalab)
+      legend("topleft", bg = '#FFFFFF80', legend = sprintf("% 8.4f   %.0f", monoisotopicMass, AUC), 
+             col = cm, pch = 16, title = "AUC bounded by Pink", cex = 0.75)
+      ymax <- max(lapply(x, function(n) n$intensities) |> unlist(), na.rm = TRUE)
+      polygonx <- c(integalab, integalab[2], integalab[1])
+      polygony <- c(0,0,ymax,ymax)
+      polygon(polygonx, polygony, col = '#FFC0CB40', border = '#FFFFFF00')
+    } else {
+      legend("topleft", bg = '#FFFFFF80', legend = as.character(sapply(x, function(o) {o$mass})), 
+             col = cm, pch = 16, title = "target mass [m/z]", cex = 0.75)
+    }
+    if (diagnostic) {
+      legend("topright", 
+             legend = paste(c("File: ", "Filter: ","Type: ", "Tolerance: "), 
+                            c(basename(attr(x,"file")), attr(x, "filter"), attr(x, "type"), attr(x, "tol"))), 
+             bty = "n", cex = 0.75, text.col = "black")
+    }
+  }
+  invisible(x)
+}
