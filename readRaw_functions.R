@@ -1,12 +1,34 @@
-# finding corresponding MS1 for MS2 52162 and 96907 ------
-scanInfo <- function(index, ms2scanNum, colname = c('masterScan', 'rtinseconds', 'precursorMass', 'charge', 'monoisotopicMz')){
-  ms2row <- index[index$scan == ms2scanNum,]
-  stopifnot(colname %in% c('masterScan', 'rtinseconds', 'precursorMass', 'charge', 'monoisotopicMz'))
-  # stopinnot(index$MSOrder == 'Ms') # enable query RT info from MS1
-  ms2row[[colname]]
+# read in indexes for all samples -----
+allindex <- function(dir = sgms, pattern = '*.raw$', named = TRUE){
+  fn <- list.files(dir, pattern = pattern)
+  listIndex <- lapply(file.path(dir, fn), function(p){readIndex(p)})
+  if (named == TRUE) {
+    names(listIndex) <- stringr::str_replace(fn, '\\.raw$', '')
+  } else if (length(named) == legnth(fn)){
+    names(listIndex) <- named
+  } else {
+    stop('named list if not the same length as ')
+  }
+  return(listIndex)
+  # allindex <- listIndex
+  # saveRDS(listIndex, file.path(local, 'rds/allindex.rds'))
 }
 
-# modification table ----
+# finding corresponding MS1 for MS2 52162 and 96907 ------
+scanInfo <- function(index, ms2scanNum, colname = NULL){
+  ms2row <- index[index$scan == ms2scanNum,]
+  if (is.null(colname)){
+    return(ms2row)
+  } else {
+    stopifnot(colname %in% c('masterScan', 'rtinseconds', 'precursorMass', 'charge', 'monoisotopicMz'))
+    # stopinnot(index$MSOrder == 'Ms') # enable query RT info from MS1
+    return(ms2row[[colname]])
+  }
+
+}
+
+
+# constand and modification table ----
 unmodified = cbind(AA="-", mono=0.0, modname = 'unmodified',  desc="unmodified") # 0
 mgo_MGH <- cbind(AA="R",mono=54.01057, modname = 'mgo_MGH', desc="mgo wo H2O, R only, H2OC2") # 1
 mgo_CEA <- cbind(AA='R',mono=72.02113, modname = 'mgo_CEA', desc="mgo w H2O, R only, H4O2C3") # 2
@@ -16,112 +38,104 @@ mgo_CEL <- cbind(AA='K',mono=72.02113, modname = 'mgo_CEL', desc="mgo w H2O, K o
 `bp(Ywhc)` <- cbind(AA= c('Y,W,H,C'), mono=361.14601, modname = 'bp(Ywhc)', desc="bp(Ywhc)") # 6
 `Acetyl (Protein N-term)` <- cbind(AA= 'N-term', mono=42.01056, modname = 'Acetyl (Protein N-term)', desc="Acetylation of the protein N-terminus") # 7
 `Oxidation (M)` <- cbind(AA= 'M', mono=15.99491, modname = 'Oxidation (M)', desc="Oxidation") # 8
-modtbl <- as.data.frame(rbind(unmodified, mgo_MGH, mgo_CEA, mgo_CEL, `N-glyceroyl(K)`, `N-phosphoglyceroyl(K)`, `bp(Ywhc)`, `Acetyl (Protein N-term)`, `Oxidation (M)`), stringsAsFactors = FALSE) # unmodified as 0,
-
-# extract mod sequence -----
-modoutput <- function(modseq_ori){
-  # the 2nd trimws will be useful in 
-  trimws(modseq_ori, whitespace = '_') |> stringr::str_replace_all('\\([^\\)]+\\)', '') |> trimws(whitespace = '\\)') 
+modtbl <- as.data.frame(rbind(unmodified, mgo_MGH, mgo_CEA, mgo_CEL, `N-glyceroyl(K)`, `N-phosphoglyceroyl(K)`, 
+                              `bp(Ywhc)`, `Acetyl (Protein N-term)`, `Oxidation (M)`), stringsAsFactors = FALSE) # unmodified as 0,
+modname_pattern <- function(modname = modtbl$modname, bracket = FALSE){
+  if (bracket){
+    modname <- paste0('(', modname, ')')
+  }
+  paste0(modname, collapse = '|') |> 
+    stringr::str_replace_all(pattern = '\\(', replacement = '\\\\(') |> 
+    stringr::str_replace_all(pattern = '\\)', replacement = '\\\\)') # modtype pattern make it a grep-able with ()bracket
 }
+H <- 1.007825
+C <- 12.000000
+O <- 15.994915
+N <- 14.003074
+P <- 30.973763
 
 # function for fragmentation ---- 
 HCD_Ion <- function(b, y){
-  C <- 12.000000
-  H <- 1.007825
-  O <- 15.994915
-  N <- 14.003074
-  P <- 30.973763
   y2 = (y + H) / 2
   b2 = (b + H) / 2
-  return(cbind(b = b, `b2+` = b2, y = y, `y2+` = y2))
+  y3 = (y + 2 * H) / 3
+  b3 = (b + 2 * H) / 3
+  return(cbind(b = b, `b2+` = b2, `b3+` = b3,  y = y, `y2+` = y2, `y3+` = y3))
 }
 
-# find precursor mass, p----
-# mod = 'mgo_MGH';mtbl = modtbl
-# modTo26letter <- function(mod, mtbl = modtbl){
-#   
-#   modaa <- mtbl$AA[mtbl$modname == mod]
-#   modmass <- mtbl$mono[mtbl$modname == mod] |> as.numeric()
-#   data(AA)
-#   AA <- dplyr::left_join(data.frame(LETTERS), AA, by = c('LETTERS' = 'letter1'))
-#   mmm <- AA$Monoisotopic+(AA$LETTERS == modaa)*modmass
-#   replace(mmm, is.na(mmm), 0L)
-# }
-# modTo26letter('mgo_MGH')
+
+# extract mod sequence -----
+modoutput <- function(modseq_ori){
+  trimws(modseq_ori, whitespace = '_') |> stringr::str_replace_all(modname_pattern(bracket = TRUE), '')
+}
 
 # obtain fragmentation pattern, only works for sequence with one modifications -----
 fragmentIon <- function(modseq_ori){
+  # taking care of N-acetylation bacause it is at the start before any sequence. 
   Nterm_Acetylation <- FALSE
   if (grepl('\\(Acetyl \\(Protein N-term\\)\\)', modseq_ori)){
     modseq_ori <- stringr::str_replace(modseq_ori, '\\(Acetyl \\(Protein N-term\\)\\)', '') 
     Nterm_Acetylation <- TRUE
   }
   modseq <- trimws(modseq_ori, whitespace = '_')
-  modrepl <- stringr::str_replace_all(modseq, '\\([^\\)]+\\)', '')
-  modpos <- stringr::str_locate_all(modseq, '\\([^\\)]+\\)') |> lapply(function(n) n[1]) |> unlist()-1
-  modtype <- stringr::str_extract_all(modseq, pattern = "(?<=\\()(\\w+)(?=\\))")|> lapply(function(n) n[1]) |> unlist()
-  modstring <- paste0(rep(0, nchar(modrepl)), collapse = "")
-  substring(modstring, first = modpos, last = modpos+1) <- as.character(which(modtbl$modname == modtype)-1)
+  allmod <- stringr::str_extract_all(modseq, modname_pattern()) |> unlist()
+  modpos <- c()
+  for (m in allmod){
+    modpos <- append(modpos, stringr::str_locate(modseq, modname_pattern(bracket = TRUE))[1, 'start']-1)
+    modseq <- stringr::str_replace(modseq, modname_pattern(bracket = TRUE), '')
+  }
+  modstring <- paste0(rep(0, stringr::str_length(modseq)), collapse = "")
+  for (i in seq_along(modpos)){
+    stringr::str_sub(modstring, start = modpos[i], end = modpos[i]) <- as.character(which(modtbl$modname %in% allmod[i])-1)
+  }
   if (Nterm_Acetylation) {
-    substring(modstring, first = 1, last = 2) <- as.character(which(modtbl$modname == 'Acetyl (Protein N-term)')-1)
-    protViz::fragmentIon(modrepl, FUN = HCD_Ion, modified = modstring, modification = modtbl$mono)[[1]] # N_term argument is not working
-  } else {
-    protViz::fragmentIon(modrepl, FUN = HCD_Ion, modified = modstring, modification = modtbl$mono)[[1]]
-  }
+    stringr::str_sub(modstring, start = 1, end = 1) <- as.character(which(modtbl$modname == 'Acetyl (Protein N-term)')-1)
+  } 
+  protViz::fragmentIon(modseq, FUN = HCD_Ion, modified = modstring, modification = modtbl$mono)[[1]]
 }
 
 
-# (not used) isotope pattern extracted from index (find precusor and charge from index, not the actual peak)
-extractedIsotopes <- function(index, ms2scanNum, isoNumber = 4){
-  mmz <- scanInfo(index, ms2scanNum, 'monoisotopicMz')
-  cha <- scanInfo(index, ms2scanNum, 'charge')
-  isotopicIons <- mmz + c(0, seq_len(4))/cha
-  return(isotopicIons)
-}
-# measured <- extractedIsotopes(high2Index, ms2_scanNum) # 535.9305 536.2638 536.5972 536.9305 537.2638
-
-# precursor charge number
-precursorChargeNum <- function(modseq_ori, cha, named = TRUE){
+# precursor charge number (side legend of MS1 plot ) or isotopicPattern ----
+# sequence (w mod), isotope number calculated until, fragIon used to find Max peak around (fragmented) precursor 
+# cha: the current precursor charge number which is going to fragment; maxcha: the max change number display on the side legend of 
+precursorMz <- function(modseq_ori, mode = c("chargeNum", "isoPattern"), fragIon = NULL, cha, maxcha = cha, isoNumber = 4, named = TRUE){
   seq <- modoutput(modseq_ori) # sequence wo modification
-  modseq <- trimws(modseq_ori, whitespace = '_')
-  modtype <- stringr::str_extract(modseq, pattern = "(?<=\\()(\\w+)(?=\\))")
-  fw <- protViz:: parentIonMass(seq) + as.numeric(modtbl$mono[modtype == modtbl$modname])
-  H <- 1.007825
-  precursor <- vector(mode = 'double', length = cha)
-  for (c in seq_len(cha)){
-    precursor[c] <- (fw + (c-1) * H)/c
+  # matching existing pattern from modtbl what you see the original sequence. 
+  modtype <- stringr::str_extract_all(modseq_ori, pattern = modname_pattern()) |> unlist()
+  modsum <- modtbl$mono[modtbl$modname %in% modtype] |> as.numeric() |> sum()
+  fw <- protViz:: parentIonMass(seq) + modsum
+  if (mode == "chargeNum"){
+    # charge number 
+    clen <- seq_len(maxcha)
+    chargeNum <- (fw + (clen-1) * H)/clen # fw is the parent ion mass!! 
+    chargeLab <- c('[M+H]+', '[M+2H]+2', '[M+3H]+3', '[M+4H]+4', '[M+5H]+5','[M+6H]+6','[M+7H]+7')
+    names(chargeNum) <- chargeLab[clen]
   }
-  if(named){
-    precursor <- round(precursor, digits = 4)
-    precLab <- c('[M+H]+', '[M+2H]+2', '[M+3H]+3', '[M+4H]+4', '[M+5H]+5')
-    paste0(precLab[seq_len(cha)], '=', precursor)
-  } else {
-    return(precursor)
+  if (mode == "isoPattern"){
+    # isotopic pattern of a particular precursor 
+    stopifnot(!is.null(fragIon))
+    iso <- seq_len(isoNumber)
+    isoPattern <- (fw + (cha-1)*H)/cha + c(0, iso)/cha # fw is the parent ion mass, not formular weight!! 
+    isoLab <- c('M', 'M+1', 'M+2', 'M+3', 'M+4', 'M+5', 'M+6', 'M+7')
+    mzerror <- isoPattern - fragIon # indicate which precursor got fragmented
+    isoLab[mzerror == min(abs(mzerror))] <- paste0(isoLab[mzerror == min(abs(mzerror))], '(F)')
+    names(isoPattern) <- isoLab[c(0, iso) + 1]
   }
+  # output
+  output <- switch(mode, chargeNum = chargeNum, isoPattern = isoPattern)
+  return(output)
 }
 
-# theoretic isotope pattern ----
-# (sequence (w mod), charge from Index$charge, number of isotope calculated, fragIon measure Max peak closest to Index'$monoisotopicMz)
-theoreticalIsotopes <- function(modseq_ori, cha, isoNumber = 4, fragIon){
-  seq <- modoutput(modseq_ori) # sequence wo modification
-  modseq <- trimws(modseq_ori, whitespace = '_')
-  modtype <- stringr::str_extract(modseq, pattern = "(?<=\\()(\\w+)(?=\\))")
-  fw <- protViz:: parentIonMass(seq) + as.numeric(modtbl$mono[modtype == modtbl$modname])
-  H <- 1.007825
-  isotopicIons <- (fw + (cha - 1)*H)/cha + c(0, seq_len(isoNumber))/cha 
-  isoLab <- c('M', 'M+1', 'M+2', 'M+3', 'M+4', 'M+5', 'M+6', 'M+7')
-  mzerror <- isotopicIons - fragIon
-  isoLab[mzerror == min(abs(mzerror))] <- paste0(isoLab[mzerror == min(abs(mzerror))], '(F)')
-  names(isotopicIons) <- isoLab[c(0, seq_len(isoNumber)) + 1]
-  return(isotopicIons) # named isotopic pattern, c('M', 'M+1', 'M+2', 'M+3', 'M+4')
-}
 
-# measured/actual isotope pattern 1) with strongest local signal intensity within the theoretical ppm window
+# measured/actual isotope pattern 1) with strongest local signal intensity within the theoretical ppm window ----
 measuredIsotopes <- function(locx, locy, theoretical, otype = c('x', 'y'),  ppm = 20){
   lapply(theoretical, function(n){
     xinRegion <- locx > n - n * ppm * 10^(-6) & locx < n + n * ppm * 10^(-6)
-    switch(otype, x = locx[locy == max(locy[xinRegion])], y = locy[locy == max(locy[xinRegion])])
-  }) |> unlist() |>  round(digits = 4)
+    if (any(xinRegion) && any(locy[xinRegion] != 0)){ 
+      # exclude 2 cases 1) xinRegion all FALSE 2) locy[xinRegion] all zero (max will return the same length if all elements are 0) 
+      switch(otype, x = locx[xinRegion & locy == max(locy[xinRegion])], y = locy[xinRegion & locy == max(locy[xinRegion])])
+    }
+  }) |> unlist() 
 }
 
 
@@ -132,7 +146,8 @@ plot.rawrrSpectrum <- function (x, modseq_ori, cha, ppm = 20, relative = TRUE, c
     xlim <- x$massRange
     ylim <- c(0, 1.2 * max(x$centroid.intensity))
   } else {
-    xlim <- c(floor(mmz), floor(mmz)+2.5) # expand x around monoisotopic peak
+    upperlim <- switch(cha, `2` = 3.5, `3` = 2.5, `4` = 2) # calculate the upper lim of ms1 based on charge number
+    xlim <- c(floor(mmz), floor(mmz) + upperlim) # expand x around monoisotopic peak
     # length(x$centroid.mZ); length(x$centroid.intensity)
     reducedCintensity <- x$centroid.intensity[which(x$centroid.mZ > xlim[1] & x$centroid.mZ < xlim[2])]
     ylim <- c(0, 1.2 * max(reducedCintensity)) # y is based on current window.
@@ -167,7 +182,7 @@ plot.rawrrSpectrum <- function (x, modseq_ori, cha, ppm = 20, relative = TRUE, c
     if (relative) { # relative = TRUE
       plot(x = x$mZ[mZidx], y = x$intensity[mZidx]/max(x$intensity[mZidx]), type = "h", 
            xlim = xlim, xlab = "m/z", ylim = c(0, 1.15), ylab = "Relative Intensity", 
-           frame.plot = FALSE, ...)
+           frame.plot = FALSE)#, ...)
     } else {
       plot(x = x$mZ[mZidx], y = x$intensity[mZidx], type = "h", xlim = xlim, 
            xlab = "m/z", ylim = ylim_notCentroid, ylab = "Intensity", frame.plot = FALSE, 
@@ -176,13 +191,14 @@ plot.rawrrSpectrum <- function (x, modseq_ori, cha, ppm = 20, relative = TRUE, c
     }
   
   # annotating precursor plot 
-  theoretical <- theoreticalIsotopes(modseq_ori = modseq_ori, cha = cha, fragIon = mmz)
+  theoretical <- precursorMz(modseq_ori, mode = 'isoPattern', fragIon = mmz, cha = cha) 
   measured_locx <- measuredIsotopes(x$mZ[mZidx], x$intensity[mZidx]/max(x$intensity[mZidx]), theoretical = theoretical, otype = 'x')
   measured_locy <- measuredIsotopes(x$mZ[mZidx], x$intensity[mZidx]/max(x$intensity[mZidx]), theoretical = theoretical, otype = 'y')
-  axis(3, theoretical, names(theoretical), las = 2) # upper box: theoretical isotopic pattern
-  axis(1, measured_locx, measured_locx, las = 2, cex.axis = 0.8) # lower box: max m/z within 20ppm of theoretical m/z
+  axis(3, theoretical, names(theoretical), las = 2) # upper box: theoretical isotopic number
+  axis(1, measured_locx, sprintf("%.4f", measured_locx), las = 2, cex.axis = 0.8) # lower box: max m/z within 20ppm of theoretical m/z
   points(measured_locx, measured_locy, col = "blue", pch = 22)
-  legend("right", precursorChargeNum(modseq_ori, cha = cha), title = "Precursor Ions", bty = "n", cex = 0.65) # precursor charge number
+  chargeNum <- precursorMz(modseq_ori, mode = 'chargeNum', cha = cha)
+  legend("right", sprintf("% 10.4f   %s", unname(chargeNum), names(chargeNum)), title = "Precursor Ions", bty = "n", cex = 0.65) # precursor charge number
   box()
   if (legend) {
     legend("topleft", paste(c("Scan#: ", "Scan Type: ", "RT [min]: ", 
@@ -203,7 +219,7 @@ plot.rawrrSpectrum <- function (x, modseq_ori, cha, ppm = 20, relative = TRUE, c
 }
 
 
-# modified protViz::psm to have 1) correctly formated fragmentation ion pattern 
+# modified protViz::psm to have 1) correctly formated fragmentation ion pattern -----
 PSM <- function (sequence, spec, FUN = defaultIon, plot = TRUE, 
                  fi = fragmentIon(sequence, FUN = FUN)[[1]], fragmentIonError = 0.6){
   n <- nchar(sequence)
@@ -248,7 +264,6 @@ PSM <- function (sequence, spec, FUN = defaultIon, plot = TRUE,
                 mZ.error/by.mZ, idx = NN, label = by.label, score = -1, 
               sequence = sequence, fragmentIon = fi))
 }
-
 
 # modified peakplot function 1)adding ppm option -----
 peakPlot <- function (oriSeq, spec, peptideSequence = modoutput(oriSeq), fi = fragmentIon(oriSeq),
@@ -303,7 +318,7 @@ peakPlot <- function (oriSeq, spec, peptideSequence = modoutput(oriSeq), fi = fr
                                         mass = c(spec$mZ[m$idx[LABEL.abc]],spec$mZ[m$idx[LABEL.xyz]]))
   if (nrow(sortedFragmentIonsTable) > 0) {
     sortedFragmentIonsTable <- sortedFragmentIonsTable[order(sortedFragmentIonsTable$mass), ]
-    legend("right", sprintf("% 10.3f   %s", sortedFragmentIonsTable$mass, 
+    legend("right", sprintf("% 10.4f   %s", sortedFragmentIonsTable$mass, 
                             sortedFragmentIonsTable$label), title = "Fragment Ions", 
            bty = "n", cex = 0.65)
   }
@@ -376,3 +391,28 @@ plot.rawrrChromatogramSet <- function (x_ori, rtmin, offset = 10, integalab, wAU
   }
   invisible(x)
 }
+
+
+# not work for  modification peptides because mod means all of that kind will be modified -----
+# find precursor mass, p----
+# mod = 'mgo_MGH';mtbl = modtbl
+# modTo26letter <- function(mod, mtbl = modtbl){
+#   
+#   modaa <- mtbl$AA[mtbl$modname == mod]
+#   modmass <- mtbl$mono[mtbl$modname == mod] |> as.numeric()
+#   data(AA)
+#   AA <- dplyr::left_join(data.frame(LETTERS), AA, by = c('LETTERS' = 'letter1'))
+#   mmm <- AA$Monoisotopic+(AA$LETTERS == modaa)*modmass
+#   replace(mmm, is.na(mmm), 0L)
+# }
+# modTo26letter('mgo_MGH')
+
+
+# (not used) isotope pattern extracted from index (find precursor and charge from index, not the actual peak)----
+# extractedIsotopes <- function(index, ms2scanNum, isoNumber = 4){
+#   mmz <- scanInfo(index, ms2scanNum, 'monoisotopicMz')
+#   cha <- scanInfo(index, ms2scanNum, 'charge')
+#   isotopicIons <- mmz + c(0, seq_len(4))/cha
+#   return(isotopicIons)
+# }
+# measured <- extractedIsotopes(high2Index, ms2_scanNum) # 535.9305 536.2638 536.5972 536.9305 537.2638
