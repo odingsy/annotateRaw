@@ -14,6 +14,34 @@ allindex <- function(dir = sgms, pattern = '*.raw$', named = TRUE){
   # saveRDS(listIndex, file.path(local, 'rds/allindex.rds'))
 }
 
+# modify the tidymod table for peptide centric table that is compatible with downstream.
+peptideCentric <- function(tbl){
+  hs <- UniProt.ws::UniProt.ws(9606)
+  geneSymbol <- UniProt.ws::select(x = hs, keys = tbl %>% tidyr::separate_rows(Proteins) %>% dplyr::pull(Proteins), columns = c('gene_primary'), keytype = 'UniProtKB')
+  d <- dplyr::left_join(tbl, geneSymbol %>% dplyr::select(Entry, `Gene.Names..primary.`), by = c('Proteins' = 'Entry')) %>% 
+    dplyr::mutate(uniqueID = paste(`Gene.Names..primary.`, type, `Positions within proteins`, sep = '_')) %>% 
+    # dplyr::select(uniqueID, Proteins, `Modified sequence`, `MS/MS scan number`, `Best localization raw file`, `Charge.evidence`, `m/z`, `MS/MS m/z`, `Calibrated retention time`) %>% 
+    tidyr::nest(data = -c(`Modified sequence`, `MS/MS scan number`)) %>% # `Modified sequence` is the unique identifier. 
+    dplyr::mutate(uniqueID = purrr::map_chr(data, ~{.x %>% dplyr::pull(uniqueID) %>% paste0(collapse = '; ' )}), 
+                  Proteins = purrr::map_chr(data, ~{.x %>% dplyr::pull(Proteins) %>% paste0(collapse = '; ' )}),
+                  `Best localization raw file` = purrr::map_chr(data, ~{.x %>% dplyr::pull(`Best localization raw file`) %>% unique(.) %>% paste0(collapse = '; ' )}),
+                  charge = purrr::map_dbl(data, ~{.x %>% dplyr::pull(`Charge.evidence`) %>% unique(.) %>% as.numeric(.)}),
+                  mz = purrr::map_dbl(data, ~{.x %>% dplyr::pull(`m/z`) %>% unique(.) %>% as.numeric(.)}),
+                  isolatemz = purrr::map_dbl(data, ~{.x %>% dplyr::pull(`MS/MS m/z`) %>% unique(.) %>% as.numeric(.)}),
+                  rt = purrr::map(data, ~{.x %>% dplyr::pull(`Calibrated retention time`) %>% unique(.) %>% unlist(.)}),
+                  rn = dplyr::row_number()) %>% 
+    dplyr::select(-data) %>% 
+    dplyr::mutate(pngLab = uniqueID, 
+                  pngLab = ifelse(stringr::str_detect(pngLab, pattern = ";"), stringr::str_extract(pngLab, '^[^;]+;'), pngLab),
+                  geneName = stringr::str_extract(pngLab, '^[^_]+_') %>% trimws(., whitespace = "_"),
+                  rest = stringr::str_remove(pngLab, '^[^_]+_'),
+                  site = stringr::str_extract(rest, '\\d+') %>% trimws(., whitespace = "_"),
+                  mod = stringr::str_remove(rest, '\\d+') %>% trimws(., whitespace = ";") %>% trimws(., whitespace = "_"),
+                  uniprot = ifelse(stringr::str_detect(Proteins, pattern = ";"), stringr::str_extract(Proteins, '^[^;]+;'), Proteins) %>% trimws(., whitespace = ";"))
+  proteinName <- UniProt.ws::select(x = hs, keys = d  %>% dplyr::pull(uniprot), columns = c('protein_name'), keytype = 'UniProtKB')
+  dplyr::left_join(d, proteinName, by = c('uniprot' = 'Entry'))
+}
+
 # finding corresponding MS1 for MS2 52162 and 96907 ------
 scanInfo <- function(index, ms2scanNum, colname = NULL){
   ms2row <- index[index$scan == ms2scanNum,]
@@ -24,8 +52,50 @@ scanInfo <- function(index, ms2scanNum, colname = NULL){
     # stopinnot(index$MSOrder == 'Ms') # enable query RT info from MS1
     return(ms2row[[colname]])
   }
-
 }
+
+
+# extract unmodified sequence -----
+unmodSeq <- function(modseq_ori, maxlength = 5){
+  subseq <- lapply(c("\\|[^\\|]+_", "\\|[^\\|]+\\|", "_[^\\|]+\\|"), function(pattern){
+    s <- stringr::str_replace_all(modseq_ori, modname_pattern(bracket = TRUE), '|')
+    stringr::str_extract_all(s, pattern = pattern)}) |> unlist() |> trimws(whitespace = '(_|\\|)') 
+  unmodSeqs <- subseq[nchar(subseq) >= maxlength]
+  l <- length(unmodSeqs)
+  if (l > 0){
+    unmodSeqs <- paste0('_', unmodSeqs, "_")
+    names(unmodSeqs) <- paste0('unmod', seq_len(l))
+    return(unmodSeqs)
+  } 
+}
+
+
+# find scan number from the split search ----
+scanNumSearching <- function(pc_spectbl_split, ms2snlist = FALSE, indextbl, raw = FALSE, mz = isolatemz, ppm = 5, rttol = 3.5){
+  # ppm and rttol cutoff are chosen by comparing against maxquant scan number from Raw search 
+  t <- pc_spectbl_split %>% 
+    dplyr::mutate(scanNumList = purrr::pmap(list(indextbl, {{ mz }}, rt), ~{
+      ..1[..1[['precursorMass']] > (..2-..2*ppm/1000000) & 
+            ..1[['precursorMass']] < (..2+..2*ppm/1000000) &
+            (..1[['rtinseconds']]/60) > (..3[1] - rttol) & 
+            (..1[['rtinseconds']]/60) < (..3[2] + rttol), 'scan'] %>% .[!is.na(.)]})) 
+  if (raw) {
+    # if raw search results are used, you can also obtain a list of spectra for identification 
+    t <- t %>% 
+      dplyr::mutate(scanNumList = purrr::map2(`MS/MS scan number`, scanNumList, ~{c(.x, unlist(.y)) %>% unique(.) %>% unlist(.)}))
+  }
+  t <- t %>% 
+    dplyr::mutate(l = lengths(scanNumList),
+                  i = ceiling(l/2),
+                  scanNum = purrr::map2_int(scanNumList, i, ~{.x[.y] %>% ifelse(length(.) == 0, NA, .) %>% as.integer(.)}))
+  switch(as.character(ms2snlist), 
+         'TRUE' = t %>% dplyr::pull(scanNumList), 
+         'T' = t %>% dplyr::pull(scanNumList), 
+         'FALSE' = t %>% dplyr::pull(scanNum),
+         'F' = t %>% dplyr::pull(scanNum), 
+         'table' = t)
+}
+
 
 
 # constand and modification table ----
@@ -64,7 +134,7 @@ HCD_Ion <- function(b, y){
 }
 
 
-# extract mod sequence -----
+# extract sequence w\o modification-----
 modoutput <- function(modseq_ori){
   trimws(modseq_ori, whitespace = '_') |> stringr::str_replace_all(modname_pattern(bracket = TRUE), '')
 }
@@ -141,16 +211,16 @@ measuredIsotopes <- function(locx, locy, theoretical, otype = c('x', 'y'),  ppm 
 
 # replace rawrr:::plot.rawrrSpectrum to show precursor and its isotope -----
 plot.rawrrSpectrum <- function (x, modseq_ori, cha, ppm = 20, relative = TRUE, centroid = FALSE, SN = FALSE, legend = TRUE, 
-                                diagnostic = FALSE, mmz, ...){
+                                diagnostic = FALSE, mmz, isolatemz = NULL, ...){
   if (is.null(mmz)){
     xlim <- x$massRange
-    ylim <- c(0, 1.2 * max(x$centroid.intensity))
+    ylim <- c(0, 1.2 * max(x$centroid.intensity,na.rm = TRUE))
   } else {
-    upperlim <- switch(cha, `2` = 3.5, `3` = 2.5, `4` = 2) # calculate the upper lim of ms1 based on charge number
+    upperlim <- switch(as.character(cha), '2' = 3.5, '3' = 2.5, '4' = 2, '5' = 2, '6' = 2) # calculate the upper lim of ms1 based on charge number
     xlim <- c(floor(mmz), floor(mmz) + upperlim) # expand x around monoisotopic peak
     # length(x$centroid.mZ); length(x$centroid.intensity)
     reducedCintensity <- x$centroid.intensity[which(x$centroid.mZ > xlim[1] & x$centroid.mZ < xlim[2])]
-    ylim <- c(0, 1.2 * max(reducedCintensity)) # y is based on current window.
+    ylim <- c(0, 1.2 * max(reducedCintensity, na.rm = TRUE)) # y is based on current window.
     # length(x$mZ); length(x$intensity)
     mZidx <- which(x$mZ > xlim[1] & x$mZ < xlim[2])
     ylim_notCentroid <- c(0, 1.19 * max(x$intensity[mZidx]))
@@ -192,8 +262,8 @@ plot.rawrrSpectrum <- function (x, modseq_ori, cha, ppm = 20, relative = TRUE, c
   
   # annotating precursor plot 
   theoretical <- precursorMz(modseq_ori, mode = 'isoPattern', fragIon = mmz, cha = cha) 
-  measured_locx <- measuredIsotopes(x$mZ[mZidx], x$intensity[mZidx]/max(x$intensity[mZidx]), theoretical = theoretical, otype = 'x')
-  measured_locy <- measuredIsotopes(x$mZ[mZidx], x$intensity[mZidx]/max(x$intensity[mZidx]), theoretical = theoretical, otype = 'y')
+  measured_locx <- measuredIsotopes(x$mZ[mZidx], x$intensity[mZidx]/max(x$intensity[mZidx]), theoretical = theoretical, otype = 'x', ppm = ppm)
+  measured_locy <- measuredIsotopes(x$mZ[mZidx], x$intensity[mZidx]/max(x$intensity[mZidx]), theoretical = theoretical, otype = 'y', ppm = ppm)
   axis(3, theoretical, names(theoretical), las = 2) # upper box: theoretical isotopic number
   axis(1, measured_locx, sprintf("%.4f", measured_locx), las = 2, cex.axis = 0.8) # lower box: max m/z within 20ppm of theoretical m/z
   points(measured_locx, measured_locy, col = "blue", pch = 22)
@@ -265,7 +335,16 @@ PSM <- function (sequence, spec, FUN = defaultIon, plot = TRUE,
               sequence = sequence, fragmentIon = fi))
 }
 
+
 # modified peakplot function 1)adding ppm option -----
+# oriSeq = modseq_ori 
+# spec = prodIon
+# itol = 5
+# unit = 'ppm'
+# fi = fragmentIon(oriSeq)
+# peptideSequence = modoutput(oriSeq)
+# sub = paste(trimws(oriSeq, whitespace = "_"), spec$title,sep = " / ")
+# pattern.abc = "[abc].*"; pattern.xyz = "[xyz].*";ion.axes = TRUE
 peakPlot <- function (oriSeq, spec, peptideSequence = modoutput(oriSeq), fi = fragmentIon(oriSeq),
                       FUN = defaultIon, sub = paste(trimws(oriSeq, whitespace = "_"), spec$title,sep = " / "), 
                       itol = 20, unit = c('ppm', 'da'), pattern.abc = "[abc].*", pattern.xyz = "[xyz].*", 
