@@ -1,44 +1,41 @@
-# DONE Non of N-acetyl is correct. correcting this 
-# DONE two or more modification implement delete/extract using non-greedy regex match
-# DONE exploring scan number independent mode, guessing scan number from maxquant 'MS/MS m/z'. 
-# TODO come up a function enable semi-automating `integalab` selection. 
-# TODO testing the current auc vs auc from xcalibur
-# TODO integration multiple sample (w multiple CV) 
-# TODO identify and quantify constituting unmodifed peptides. 
-# TODO for precursor matches, instead of of find maximum around precursor (mmz), should do maxquant output (theoretical precursor mass from sequence and charge )vs raw index (actual precursor mass vs charge)
-# TODO testing mass tolerance in by protVis_findNN_ is described. 
-
-
-# log
-# 230316: outpng_raw_5ppmAllSamples, outpng_split_5ppmAllSamples
-# scanNumSearching: ppm = 5, rttol = 3.5
-# plot: ppm = 5
-# peakplot: itol = 5
-# readChromatogram: tol = 10
-
-# 230320
-# run until: "077_ctrllong1_unmod2_c2_55708"
-
-
 library(rawrr)
 library(protViz)
 library(magrittr)
-library(parallel)
+
 
 
 # directory -----
 local <- '' # local path, code, output 
 sgms <- '' # .raw file dir
 source(file.path(local,'readRaw_functions.R'))
-# source('https://raw.githubusercontent.com/odingsy/annotateRaw/main/readRaw_functions.R')
-
 
 # read in index ----
-# allindex <- allindex(dir = sgms, pattern = '*.raw$', named = TRUE)
+# allindex <- allindex(dir = sgms, pattern = '.raw$', named = TRUE) # allindex(dir = sgms, pattern = '*.raw$', named = TRUE)
+# saveRDS(allindex, file.path(local, 'rds/allindex.rds'))
 allindex <- readRDS(file.path(local, 'rds/allindex.rds'))
 
-tbl <- readRDS(file.path(local, 'rds/tbl_modpng.rds'))
-combiPlot <- function(i){
+# construct png tbl from with just input sequence
+indexnames <- stringr::str_replace(list.files(sgms), '.raw', '') 
+allseq_name <- c() 
+ppm <- 20
+peptideSeq <- c('_TALQEVY(bp(Ywhc))TLAEHR_', '_AAEAAASAY(bp(Ywhc))YNPGNPHNVYMPTSQPPPPPYYPPEDK_') # change this 
+rt <- list() # list(c(100, 105), c(90, 95)) # change this 
+cha <- c(2, 4) # change this 
+
+tblContructor <- function(...){
+  if (length(rt) != length(peptideSeq)) for (i in seq_len(length(peptideSeq))) rt[[i]] <- c(50, 150)
+  if (length(cha) != length(peptideSeq)) for (i in seq_len(length(peptideSeq))) cha[i] <- 3 # default 
+  if (length(allseq_name) != length(peptideSeq)) for (i in seq_len(length(peptideSeq))) allseq_name[i] <- 'bp(Ywhc)'
+  tidyr::expand_grid(tibble::tibble(allseq = peptideSeq, allseq_name = allseq_name, rt = rt, ppm = ppm, cha = cha) %>% dplyr::mutate(rn = dplyr::row_number()), tibble::tibble(indexnames = indexnames)) %>% 
+    dplyr::mutate(isolatemz = purrr::map2_dbl(allseq, cha, ~{ precursorMz(.x, mode = 'chargeNum', cha = .y)[.y] }),
+                  indextbl = purrr::map(indexnames, ~{allindex[[.]]})) %>% 
+    scanNumSearching(., ms2snlist = 'table', indextbl = indextbl, raw = FALSE, mz = isolatemz, ppm = ppm, rttol = 5) %>%
+    dplyr::select(-indextbl)
+}
+
+tbl <- tblContructor()
+
+for (i in seq_len(nrow(tbl))){
   modseq_ori <- tbl[[i, 'allseq']]
   cha <- tbl[[i, 'cha']]
   indexName <- tbl[[i, 'indexnames']]
@@ -48,7 +45,7 @@ combiPlot <- function(i){
   modtype <- tbl[[i, 'allseq_name']]
   isolatemz <- tbl[[i, 'isolatemz']]
   if (length(scanNum) == 0) {next}
-    for (j in seq_along(scanNum)){
+  for (j in seq_along(scanNum)){
     tryCatch({
       # all parameters 
       ms2_scanNum <- scanNum[j] # tbl[[i, 'MS/MS scan number']]
@@ -59,8 +56,10 @@ combiPlot <- function(i){
       print(fn)
       
       # graphing parameters
+      pngPath <- file.path(local, "outpng_041_raw", paste0(fn, ".png"))
+      # if (file.exists(pngPath)) {next}
       graphics.off()
-      png(file = file.path(local, "outpng_raw", paste0(fn, ".png")), width = 12, height = 7, units = 'in', res = 300)
+      png(file = pngPath, width = 12, height = 7, units = 'in', res = 300)
       # layout setting
       layout.matrix <- matrix(c(3, 3, 1, 2), byrow = TRUE, nrow = 2)
       layout(mat = layout.matrix,
@@ -81,13 +80,8 @@ combiPlot <- function(i){
       theoretical <- precursorMz(modseq_ori, mode = 'isoPattern', fragIon = mmz, cha = cha)
       high2Chr <- readChromatogram(rawFile, mass = theoretical, tol = 10)
       rtms1 <- scanInfo(index, ms2_scanNum, 'rtinseconds')/60
-      plot.rawrrChromatogramSet(high2Chr, rtmin = rtms1, offset = 10, integalab = integalab, wAUC = wAUC)
+      plot.rawrrChromatogramSet(high2Chr, rtmin = rtms1, offset = 10, isotopeName = names(theoretical), integalab = integalab, wAUC = wAUC)
       dev.off()
     }, error = function(e){cat("ERROR :",conditionMessage(e), "\n")})
-}}
-
- 
-mclapply(1:nrow(tbl), combiPlot, mc.cores = detectCores() - 1)
-
-
-
+  }
+}

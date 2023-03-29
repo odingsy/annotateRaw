@@ -71,12 +71,12 @@ unmodSeq <- function(modseq_ori, maxlength = 5){
 
 
 # find scan number from the split search ----
-scanNumSearching <- function(pc_spectbl_split, ms2snlist = FALSE, indextbl, raw = FALSE, mz = isolatemz, ppm = 5, rttol = 3.5){
+scanNumSearching <- function(pc_spectbl_split, ms2snlist = FALSE, indextbl, raw = FALSE, mz = isolatemz, ppm = ppm, rttol = 3.5){
   # ppm and rttol cutoff are chosen by comparing against maxquant scan number from Raw search 
   t <- pc_spectbl_split %>% 
-    dplyr::mutate(scanNumList = purrr::pmap(list(indextbl, {{ mz }}, rt), ~{
-      ..1[..1[['precursorMass']] > (..2-..2*ppm/1000000) & 
-            ..1[['precursorMass']] < (..2+..2*ppm/1000000) &
+    dplyr::mutate(scanNumList = purrr::pmap(list(indextbl, {{ mz }}, rt, {{ ppm }}), ~{
+      ..1[..1[['precursorMass']] > (..2-..2*..4/1000000) & 
+            ..1[['precursorMass']] < (..2+..2*..4/1000000) &
             (..1[['rtinseconds']]/60) > (..3[1] - rttol) & 
             (..1[['rtinseconds']]/60) < (..3[2] + rttol), 'scan'] %>% .[!is.na(.)]})) 
   if (raw) {
@@ -433,17 +433,27 @@ auc <- function(x, integalab){
 }
 
 # replace rawrr:::plot.rawrrChromatogram  -----
-plot.rawrrChromatogramSet <- function (x_ori, rtmin, offset = 10, integalab, wAUC = FALSE, diagnostic = FALSE, ...){
+plot.rawrrChromatogramSet <- function (x_ori, rtmin, offset = 10, integalab, wAUC = FALSE, diagnostic = FALSE,xlim = NULL, ylim = NULL,isotopeNames, ...){
   if(!is.null(rtmin)){
     x <- chromatoZoomed(x = x_ori, rtmin = rtmin, offset = offset, eliminate0 = TRUE)
   }
   stopifnot(attr(x, "class") == "rawrrChromatogramSet")
   if (attr(x, "type") == "xic") {
-    plot(0, 0, type = "n", 
-         xlim = range(unlist(lapply(x, function(o) {o$times}))), 
-         ylim = range(unlist(lapply(x, function(o) {o$intensities}))), 
+    if (!is.null(xlim)){
+      xlim <- xlim
+    } else {
+      xlim = range(unlist(lapply(x, function(o) {o$times})))
+    }
+    if (!is.null(ylim)){
+      ylim <- ylim
+    } else {
+      ylim = range(unlist(lapply(x, function(o) {o$intensities})))
+    }
+    plot(0, 0, type = "n", xaxt = "n", 
+         xlim = xlim, ylim = ylim, 
          frame.plot = FALSE, xlab = "Retention Time [min]",
          ylab = "Intensities", ...)
+    axis(1, at = seq(floor(xlim[1]), ceiling(xlim[2]), by = 1L))
     cm <- hcl.colors(length(x), "Set 2")
     mapply(function(o, co) {
       lines(o$times, o$intensities, col = co)
@@ -451,12 +461,13 @@ plot.rawrrChromatogramSet <- function (x_ori, rtmin, offset = 10, integalab, wAU
     if (wAUC){
       monoisotopicMass <- lapply(x, function(o) {o$mass}) |> unlist()
       AUC <- chromatoZoomed(x = x_ori, rtmin = rtmin, offset = offset, eliminate0 = FALSE) |> auc(integalab = integalab)
-      legend("topleft", bg = '#FFFFFF80', legend = sprintf("% 8.4f   %.0f", monoisotopicMass, AUC), 
+      legend("topleft", bg = '#FFFFFF80', legend = sprintf("%s    %.0f", isotopeNames, AUC), 
              col = cm, pch = 16, title = "AUC bounded by Pink", cex = 0.75)
       ymax <- max(lapply(x, function(n) n$intensities) |> unlist(), na.rm = TRUE)
       polygonx <- c(integalab, integalab[2], integalab[1])
       polygony <- c(0,0,ymax,ymax)
       polygon(polygonx, polygony, col = '#FFC0CB40', border = '#FFFFFF00')
+      return(AUC)
     } else {
       legend("topleft", bg = '#FFFFFF80', legend = as.character(sapply(x, function(o) {o$mass})), 
              col = cm, pch = 16, title = "target mass [m/z]", cex = 0.75)
@@ -468,7 +479,6 @@ plot.rawrrChromatogramSet <- function (x_ori, rtmin, offset = 10, integalab, wAU
              bty = "n", cex = 0.75, text.col = "black")
     }
   }
-  invisible(x)
 }
 
 
