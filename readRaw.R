@@ -5,35 +5,30 @@ library(magrittr)
 
 
 # directory -----
-local <- '' # local path, code, output 
+basePath <- ''
+local <- file.path(basePath, '') # local where output png exists
 sgms <- '' # .raw file dir
-source(file.path(local,'readRaw_functions.R'))
+maxquantTXTs <- file.path(local, '') # containing maxquant txt output
+source(file.path(basePath,''))
 
 # read in index ----
 # allindex <- allindex(dir = sgms, pattern = '.raw$', named = TRUE) # allindex(dir = sgms, pattern = '*.raw$', named = TRUE)
 # saveRDS(allindex, file.path(local, 'rds/allindex.rds'))
 allindex <- readRDS(file.path(local, 'rds/allindex.rds'))
+indexnames <- stringr::str_replace(list.files(sgms, pattern = '.raw$'), '.raw$', '')
 
-# construct png tbl from with just input sequence
-indexnames <- stringr::str_replace(list.files(sgms), '.raw', '') 
-allseq_name <- c() 
-ppm <- 20
-peptideSeq <- c('_TALQEVY(bp(Ywhc))TLAEHR_', '_AAEAAASAY(bp(Ywhc))YNPGNPHNVYMPTSQPPPPPYYPPEDK_') # change this 
-rt <- list() # list(c(100, 105), c(90, 95)) # change this 
-cha <- c(2, 4) # change this 
+# Run this for manual input of peptide sequence -----
+tbl <- tblContructor(peptideSeq = c('_TALQEVY(bp(Ywhc))TLAEHR_', '_AAEAAASAY(bp(Ywhc))YNPGNPHNVYMPTSQPPPPPYYPPEDK_'), 
+                     indexnames = indexnames, Modification = 'mgo_MGH',ppm  = 20, rt = 2, cha = 3)
 
-tblContructor <- function(...){
-  if (length(rt) != length(peptideSeq)) for (i in seq_len(length(peptideSeq))) rt[[i]] <- c(50, 150)
-  if (length(cha) != length(peptideSeq)) for (i in seq_len(length(peptideSeq))) cha[i] <- 3 # default 
-  if (length(allseq_name) != length(peptideSeq)) for (i in seq_len(length(peptideSeq))) allseq_name[i] <- 'bp(Ywhc)'
-  tidyr::expand_grid(tibble::tibble(allseq = peptideSeq, allseq_name = allseq_name, rt = rt, ppm = ppm, cha = cha) %>% dplyr::mutate(rn = dplyr::row_number()), tibble::tibble(indexnames = indexnames)) %>% 
-    dplyr::mutate(isolatemz = purrr::map2_dbl(allseq, cha, ~{ precursorMz(.x, mode = 'chargeNum', cha = .y)[.y] }),
-                  indextbl = purrr::map(indexnames, ~{allindex[[.]]})) %>% 
-    scanNumSearching(., ms2snlist = 'table', indextbl = indextbl, raw = FALSE, mz = isolatemz, ppm = ppm, rttol = 5) %>%
-    dplyr::select(-indextbl)
-}
+# Run this to extract information from maxquant output ----
+tbl <- peptideCentric(maxquantTXTs = maxquantTXTs, modtbl = 'xxx.txt')
+tbl <- tbl %>% 
+  tidyr::expand_grid(., tibble::tibble(indexnames = indexnames)) %>% 
+  dplyr::mutate(indextbl = purrr::map(indexnames, ~{allindex[[.]]})) %>% 
+  scanNumSearching(., ms2snlist = 'table', indextbl = indextbl, raw = FALSE, mz = `MS/MS m/z`, ppm = ppm,rt = `Retention time`, rttol = 7) %>%
+  dplyr::select(-indextbl)
 
-tbl <- tblContructor()
 
 for (i in seq_len(nrow(tbl))){
   modseq_ori <- tbl[[i, 'allseq']]
@@ -56,8 +51,8 @@ for (i in seq_len(nrow(tbl))){
       print(fn)
       
       # graphing parameters
-      pngPath <- file.path(local, "outpng_041_raw", paste0(fn, ".png"))
-      # if (file.exists(pngPath)) {next}
+      pngPath <- file.path(local, "outpng", paste0(fn, ".png"))
+      if (file.exists(pngPath)) {next}
       graphics.off()
       png(file = pngPath, width = 12, height = 7, units = 'in', res = 300)
       # layout setting

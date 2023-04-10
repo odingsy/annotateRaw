@@ -1,1 +1,3 @@
 rds/*.rds
+.DS_Store
+rds/.DS_Store

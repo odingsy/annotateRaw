@@ -14,32 +14,31 @@ allindex <- function(dir = sgms, pattern = '*.raw$', named = TRUE){
   # saveRDS(listIndex, file.path(local, 'rds/allindex.rds'))
 }
 
-# modify the tidymod table for peptide centric table that is compatible with downstream.
-peptideCentric <- function(tbl){
-  hs <- UniProt.ws::UniProt.ws(9606)
-  geneSymbol <- UniProt.ws::select(x = hs, keys = tbl %>% tidyr::separate_rows(Proteins) %>% dplyr::pull(Proteins), columns = c('gene_primary'), keytype = 'UniProtKB')
-  d <- dplyr::left_join(tbl, geneSymbol %>% dplyr::select(Entry, `Gene.Names..primary.`), by = c('Proteins' = 'Entry')) %>% 
-    dplyr::mutate(uniqueID = paste(`Gene.Names..primary.`, type, `Positions within proteins`, sep = '_')) %>% 
-    # dplyr::select(uniqueID, Proteins, `Modified sequence`, `MS/MS scan number`, `Best localization raw file`, `Charge.evidence`, `m/z`, `MS/MS m/z`, `Calibrated retention time`) %>% 
-    tidyr::nest(data = -c(`Modified sequence`, `MS/MS scan number`)) %>% # `Modified sequence` is the unique identifier. 
-    dplyr::mutate(uniqueID = purrr::map_chr(data, ~{.x %>% dplyr::pull(uniqueID) %>% paste0(collapse = '; ' )}), 
-                  Proteins = purrr::map_chr(data, ~{.x %>% dplyr::pull(Proteins) %>% paste0(collapse = '; ' )}),
-                  `Best localization raw file` = purrr::map_chr(data, ~{.x %>% dplyr::pull(`Best localization raw file`) %>% unique(.) %>% paste0(collapse = '; ' )}),
-                  charge = purrr::map_dbl(data, ~{.x %>% dplyr::pull(`Charge.evidence`) %>% unique(.) %>% as.numeric(.)}),
-                  mz = purrr::map_dbl(data, ~{.x %>% dplyr::pull(`m/z`) %>% unique(.) %>% as.numeric(.)}),
-                  isolatemz = purrr::map_dbl(data, ~{.x %>% dplyr::pull(`MS/MS m/z`) %>% unique(.) %>% as.numeric(.)}),
-                  rt = purrr::map(data, ~{.x %>% dplyr::pull(`Calibrated retention time`) %>% unique(.) %>% unlist(.)}),
-                  rn = dplyr::row_number()) %>% 
-    dplyr::select(-data) %>% 
-    dplyr::mutate(pngLab = uniqueID, 
-                  pngLab = ifelse(stringr::str_detect(pngLab, pattern = ";"), stringr::str_extract(pngLab, '^[^;]+;'), pngLab),
-                  geneName = stringr::str_extract(pngLab, '^[^_]+_') %>% trimws(., whitespace = "_"),
-                  rest = stringr::str_remove(pngLab, '^[^_]+_'),
-                  site = stringr::str_extract(rest, '\\d+') %>% trimws(., whitespace = "_"),
-                  mod = stringr::str_remove(rest, '\\d+') %>% trimws(., whitespace = ";") %>% trimws(., whitespace = "_"),
-                  uniprot = ifelse(stringr::str_detect(Proteins, pattern = ";"), stringr::str_extract(Proteins, '^[^;]+;'), Proteins) %>% trimws(., whitespace = ";"))
-  proteinName <- UniProt.ws::select(x = hs, keys = d  %>% dplyr::pull(uniprot), columns = c('protein_name'), keytype = 'UniProtKB')
-  dplyr::left_join(d, proteinName, by = c('uniprot' = 'Entry'))
+# construct png tbl from maquant output peptide centric table that is compatible with downstream.
+peptideCentric <- function(maxquantTXTs, modtbl = 'mgo_MGHSites.txt', modtxt = modtbl, ppm = 20){
+  dplyr::left_join(readr::read_delim(file.path(maxquantTXTs, modtbl)) %>%
+                     dplyr::filter(is.na(Reverse) & is.na(`Potential contaminant`) & (!stringr::str_detect(Protein, "^CON__"))) %>% 
+                     dplyr::select("Best localization evidence ID") %>% # Best localization evidence ID is as unique as modified sequence
+                     dplyr::summarise(`Best localization evidence ID` = unique(`Best localization evidence ID`)), 
+                   readr::read_delim(file.path(maxquantTXTs, 'evidence.txt')) %>%
+                     dplyr::select(`Proteins`, Charge, `Gene names`, `MS/MS m/z`, `Retention time`, `Modified sequence`, id), 
+                   by = c("Best localization evidence ID" = "id")) %>% 
+    dplyr::select(-`Best localization evidence ID`) %>% 
+    dplyr::mutate(rn = dplyr::row_number(),
+                  Modification = stringr::str_extract(modtxt, ".+(?=S|sites)"),
+                  ppm = ppm) 
+}
+
+# construct png tbl with a few input sequence ----
+tblContructor <- function(peptideSeq,indexnames, Modification,ppm  = 20, rt = 80, cha = 3, rttol = 5){
+  if (length(rt) != length(peptideSeq)) for (i in seq_len(length(peptideSeq))) rt[i] <- 100; rttol = 50
+  if (length(cha) != length(peptideSeq)) for (i in seq_len(length(peptideSeq))) cha[i] <- 3 # default 
+  if (length(Modification) != length(peptideSeq)) for (i in seq_len(length(peptideSeq))) Modification[i] <- 'bp(Ywhc)'
+  tidyr::expand_grid(tibble::tibble(allseq = peptideSeq, Modification = Modification, rt = rt, ppm = ppm, cha = cha) %>% dplyr::mutate(rn = dplyr::row_number()), tibble::tibble(indexnames = indexnames)) %>% 
+    dplyr::mutate(isolatemz = purrr::map2_dbl(allseq, cha, ~{ precursorMz(.x, mode = 'chargeNum', cha = .y)[.y] }),
+                  indextbl = purrr::map(indexnames, ~{allindex[[.]]})) %>% 
+    scanNumSearching(., ms2snlist = 'table', indextbl = indextbl, raw = FALSE, mz = isolatemz, ppm = ppm, rt = rt, rttol = rttol) %>%
+    dplyr::select(-indextbl)
 }
 
 # finding corresponding MS1 for MS2 52162 and 96907 ------
@@ -71,14 +70,14 @@ unmodSeq <- function(modseq_ori, maxlength = 5){
 
 
 # find scan number from the split search ----
-scanNumSearching <- function(pc_spectbl_split, ms2snlist = FALSE, indextbl, raw = FALSE, mz = isolatemz, ppm = ppm, rttol = 3.5){
+scanNumSearching <- function(pctbl, ms2snlist = FALSE, indextbl, raw = FALSE, mz = isolatemz, ppm = ppm, rt = rt, rttol = 7){
   # ppm and rttol cutoff are chosen by comparing against maxquant scan number from Raw search 
-  t <- pc_spectbl_split %>% 
-    dplyr::mutate(scanNumList = purrr::pmap(list(indextbl, {{ mz }}, rt, {{ ppm }}), ~{
-      ..1[..1[['precursorMass']] > (..2-..2*..4/1000000) & 
-            ..1[['precursorMass']] < (..2+..2*..4/1000000) &
-            (..1[['rtinseconds']]/60) > (..3[1] - rttol) & 
-            (..1[['rtinseconds']]/60) < (..3[2] + rttol), 'scan'] %>% .[!is.na(.)]})) 
+  t <- pctbl %>% 
+    dplyr::mutate(scanNumList = purrr::pmap(list(indextbl, {{ mz }}, {{ rt }}, {{ ppm }}), ~{
+      ..1[..1[['precursorMass']] > (..2-..2*..4/1e6) & 
+            ..1[['precursorMass']] < (..2+..2*..4/1e6) &
+            (..1[['rtinseconds']]/60) > (..3 - rttol) & 
+            (..1[['rtinseconds']]/60) < (..3 + rttol), 'scan'] %>% .[!is.na(.)]})) 
   if (raw) {
     # if raw search results are used, you can also obtain a list of spectra for identification 
     t <- t %>% 
@@ -98,18 +97,21 @@ scanNumSearching <- function(pc_spectbl_split, ms2snlist = FALSE, indextbl, raw 
 
 
 
-# constand and modification table ----
-unmodified = cbind(AA="-", mono=0.0, modname = 'unmodified',  desc="unmodified") # 0
-mgo_MGH <- cbind(AA="R",mono=54.01057, modname = 'mgo_MGH', desc="mgo wo H2O, R only, H2OC2") # 1
-mgo_CEA <- cbind(AA='R',mono=72.02113, modname = 'mgo_CEA', desc="mgo w H2O, R only, H4O2C3") # 2
-mgo_CEL <- cbind(AA='K',mono=72.02113, modname = 'mgo_CEL', desc="mgo w H2O, K only, H4O2C3") # 3
-`N-glyceroyl(K)` <- cbind(AA='K',mono=88.01604, modname = 'N-glyceroyl(K)', desc="mgo w H2O, K only, H4O2C3") # 4
-`N-phosphoglyceroyl(K)` <- cbind(AA='K',mono=167.98237, modname = 'N-phosphoglyceroyl(K)', desc="mgo w H2O, K only, H4O2C3") # 5
-`bp(Ywhc)` <- cbind(AA= c('Y,W,H,C'), mono=361.14601, modname = 'bp(Ywhc)', desc="bp(Ywhc)") # 6
-`Acetyl (Protein N-term)` <- cbind(AA= 'N-term', mono=42.01056, modname = 'Acetyl (Protein N-term)', desc="Acetylation of the protein N-terminus") # 7
-`Oxidation (M)` <- cbind(AA= 'M', mono=15.99491, modname = 'Oxidation (M)', desc="Oxidation") # 8
-modtbl <- as.data.frame(rbind(unmodified, mgo_MGH, mgo_CEA, mgo_CEL, `N-glyceroyl(K)`, `N-phosphoglyceroyl(K)`, 
-                              `bp(Ywhc)`, `Acetyl (Protein N-term)`, `Oxidation (M)`), stringsAsFactors = FALSE) # unmodified as 0,
+# modification table ----
+modtbl <- tibble::tribble(
+  ~AA, ~mono, ~modname, ~desc, 
+  '-', 0.0, "unmodified", "unmodified",                                                            #0
+  "R", 54.01057, "mgo_MGH", "mgo wo H2O, R only, H2OC2",                                           #1
+  "R", 72.02113, "mgo_CEA", "mgo w H2O, R only, H4O2C3",                                           #2
+  "K", 72.02113, "mgo_CEL", "mgo w H2O, K only, H4O2C3",                                           #3
+  "K", 88.01604, "N-glyceroyl(K)", "---",                                                          #4
+  "K", 167.98237, "N-phosphoglyceroyl(K)", "---",                                                  #5
+  "Y,W,H,C", 361.14601, "bp(Ywhc)", "APEX",                                                        #6
+  "N-term", 42.01056, "Acetyl (Protein N-term)", "Acetylation of the protein N-terminus",          #7
+  "M", 15.99491, "Oxidation (M)", "Methionine oxidation",                                          #8
+  "R", 6.020129, "R6", "heavy arginine",                                                           #9
+  "K", 8.014199, "K8", "heavy lysine"                                                              #10
+)
 modname_pattern <- function(modname = modtbl$modname, bracket = FALSE){
   if (bracket){
     modname <- paste0('(', modname, ')')
