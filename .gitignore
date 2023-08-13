@@ -1,3 +1,5 @@
 rds/*.rds
 .DS_Store
 rds/.DS_Store
+outpng/*
+221106_rawSearch_mod2_misCleavage2_minPeplen5/*

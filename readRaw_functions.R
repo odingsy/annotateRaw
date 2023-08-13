@@ -1,5 +1,5 @@
-# read in indexes for all samples -----
-allindex <- function(dir = sgms, pattern = '*.raw$', named = TRUE){
+# read in indexes for all samples ----
+extractIndex <- function(dir = sgms, pattern = '*.raw$', named = TRUE){
   fn <- list.files(dir, pattern = pattern)
   listIndex <- lapply(file.path(dir, fn), function(p){readIndex(p)})
   if (named == TRUE) {
@@ -14,23 +14,29 @@ allindex <- function(dir = sgms, pattern = '*.raw$', named = TRUE){
   # saveRDS(listIndex, file.path(local, 'rds/allindex.rds'))
 }
 
-# construct png tbl from maquant output peptide centric table that is compatible with downstream.
-peptideCentric <- function(maxquantTXTs, modtbl = 'mgo_MGHSites.txt', modtxt = modtbl, ppm = 20){
-  dplyr::left_join(readr::read_delim(file.path(maxquantTXTs, modtbl)) %>%
+# construct png tbl from maquant output peptide centric table that is compatible with downstream ----
+modsFromMaxquant <- function(maxquantTXTs, modtbl = 'mgo_MGHSites.txt', modtxt = modtbl, ppm = 20, rttol = 5){
+  dplyr::left_join(readr::read_delim(file.path(maxquantTXTs, modtbl)) %>% # filter joint: filter evidence based on unique best localization in the mod.txt
                      dplyr::filter(is.na(Reverse) & is.na(`Potential contaminant`) & (!stringr::str_detect(Protein, "^CON__"))) %>% 
-                     dplyr::select("Best localization evidence ID") %>% # Best localization evidence ID is as unique as modified sequence
-                     dplyr::summarise(`Best localization evidence ID` = unique(`Best localization evidence ID`)), 
+                     dplyr::select(`Best localization evidence ID`) %>% # Best localization evidence ID is as unique as modified sequence
+                     dplyr::distinct(`Best localization evidence ID`), 
                    readr::read_delim(file.path(maxquantTXTs, 'evidence.txt')) %>%
                      dplyr::select(`Proteins`, Charge, `Gene names`, `MS/MS m/z`, `Retention time`, `Modified sequence`, id), 
                    by = c("Best localization evidence ID" = "id")) %>% 
     dplyr::select(-`Best localization evidence ID`) %>% 
-    dplyr::mutate(rn = dplyr::row_number(),
+    dplyr::mutate(rn = dplyr::row_number(), # number of mod sequences
                   Modification = stringr::str_extract(modtxt, ".+(?=S|sites)"),
-                  ppm = ppm) 
+                  ppm = ppm) %>% 
+    tidyr::expand_grid(., tibble::tibble(indexnames = indexnames)) %>% # pairing every modseq to every file 
+    dplyr::mutate(indextbl = purrr::map(indexnames, ~{allindex[[.]]})) %>% # store the actual index in the table
+    dplyr::rename(isolatemz = `MS/MS m/z`, rt = `Retention time`, allseq = `Modified sequence`, cha = Charge) %>% 
+    scanNumSearching(., ms2snlist = 'table', indextbl = indextbl, raw = FALSE, mz = isolatemz, ppm = ppm, rt = rt, rttol = rttol) %>%
+    dplyr::select(-indextbl) %>% 
+    dplyr::select(allseq, Modification, rt, ppm, cha, rn, indexnames, isolatemz, scanNumList, l, i, scanNum)
 }
 
 # construct png tbl with a few input sequence ----
-tblContructor <- function(peptideSeq,indexnames, Modification,ppm  = 20, rt = 80, cha = 3, rttol = 5){
+modsManual <- function(peptideSeq,indexnames, Modification,ppm  = 20, rt = 80, cha = 3, rttol = 5){
   if (length(rt) != length(peptideSeq)) for (i in seq_len(length(peptideSeq))) rt[i] <- 100; rttol = 50
   if (length(cha) != length(peptideSeq)) for (i in seq_len(length(peptideSeq))) cha[i] <- 3 # default 
   if (length(Modification) != length(peptideSeq)) for (i in seq_len(length(peptideSeq))) Modification[i] <- 'bp(Ywhc)'
@@ -97,15 +103,15 @@ scanNumSearching <- function(pctbl, ms2snlist = FALSE, indextbl, raw = FALSE, mz
 
 
 
-# modification table ----
+# modification table, max Number of mod is 10(0-9), 10 will give error ----
 modtbl <- tibble::tribble(
   ~AA, ~mono, ~modname, ~desc, 
   '-', 0.0, "unmodified", "unmodified",                                                            #0
   "R", 54.01057, "mgo_MGH", "mgo wo H2O, R only, H2OC2",                                           #1
   "R", 72.02113, "mgo_CEA", "mgo w H2O, R only, H4O2C3",                                           #2
   "K", 72.02113, "mgo_CEL", "mgo w H2O, K only, H4O2C3",                                           #3
-  "K", 88.01604, "N-glyceroyl(K)", "---",                                                          #4
-  "K", 167.98237, "N-phosphoglyceroyl(K)", "---",                                                  #5
+  # "K", 88.01604, "N-glyceroyl(K)", "---",                                                          #4
+  # "K", 167.98237, "N-phosphoglyceroyl(K)", "---",                                                  #5
   "Y,W,H,C", 361.14601, "bp(Ywhc)", "APEX",                                                        #6
   "N-term", 42.01056, "Acetyl (Protein N-term)", "Acetylation of the protein N-terminus",          #7
   "M", 15.99491, "Oxidation (M)", "Methionine oxidation",                                          #8
@@ -227,7 +233,7 @@ plot.rawrrSpectrum <- function (x, modseq_ori, cha, ppm = 20, relative = TRUE, c
     mZidx <- which(x$mZ > xlim[1] & x$mZ < xlim[2])
     ylim_notCentroid <- c(0, 1.19 * max(x$intensity[mZidx]))
   }
-  stopifnot(is.rawrrSpectrum(x))
+  # stopifnot(is.rawrrSpectrum(x))
   if (centroid) {
     stopifnot(x$centroidStream)
     if (SN) {
@@ -339,7 +345,7 @@ PSM <- function (sequence, spec, FUN = defaultIon, plot = TRUE,
 
 
 # modified peakplot function 1)adding ppm option -----
-# oriSeq = modseq_ori 
+# oriSeq = modseq_ori
 # spec = prodIon
 # itol = 5
 # unit = 'ppm'
@@ -483,6 +489,22 @@ plot.rawrrChromatogramSet <- function (x_ori, rtmin, offset = 10, integalab, wAU
   }
 }
 
+
+plotMS_arg <- function(pngPath, x, allseq, cha, mmz, prodIon, high2Chr, rtms1, theoretical, rt, ...){
+  if (file.exists(pngPath)) {next}
+  graphics.off()
+  png(file = pngPath, width = 12, height = 7, units = 'in', res = 300)
+  # layout setting
+  layout.matrix <- matrix(c(3, 3, 1, 2), byrow = TRUE, nrow = 2)
+  layout(mat = layout.matrix,
+         heights = c(2, 3), # Heights of the two rows
+         widths = c(2, 2)) # Widths of the two columns
+  
+  plot(x, allseq, cha = cha, relative = TRUE, SN = FALSE, mmz = mmz, ppm = 5) # xlim take monoisotopic and derived xaxis window around this value.
+  peakPlot(oriSeq = allseq, spec = prodIon, itol = 5, unit = 'ppm')
+  plot.rawrrChromatogramSet(high2Chr, rtmin = rtms1, offset = 10, isotopeName = names(theoretical), integalab = c(rt-3, rt+3), wAUC = FALSE)
+  dev.off()
+}
 
 # not work for  modification peptides because mod means all of that kind will be modified -----
 # find precursor mass, p----
